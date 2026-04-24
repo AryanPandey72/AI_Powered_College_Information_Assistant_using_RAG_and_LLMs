@@ -1,9 +1,10 @@
 streamlit
 groq
-chromadb
 langchain-groq
 pdfplumber
 pymupdf
 mysql-connector-python
 python-dotenv
 pysqlite3-binary
+opensearch-py
+sentence-transformers
