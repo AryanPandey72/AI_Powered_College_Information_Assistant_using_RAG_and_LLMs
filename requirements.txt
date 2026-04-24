@@ -2,9 +2,10 @@ streamlit
 groq
 langchain-groq
 pdfplumber
+langchain-community
 pymupdf
 mysql-connector-python
 python-dotenv
 pysqlite3-binary
-opensearch-py
 sentence-transformers
+faiss-cpu
