@@ -1,25 +1,19 @@
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 import os
 import sys
 import json
 from dotenv import load_dotenv
-import chromadb      
-from chromadb.utils import embedding_functions
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from db_connector import execute_query, get_all_faculty_names
 
 # ==========================================
 # 1. SETUP & CONFIGURATION
 # ==========================================
-
-# Load environment variables
 load_dotenv()
 
-# Validate API key
 if not os.getenv("GROQ_API_KEY"):
     raise ValueError("GROQ_API_KEY not found. Check your .env file.")
 
@@ -30,49 +24,41 @@ llm = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY")
 )
 
-# Connect to Vector Database
-chroma_client = chromadb.PersistentClient(path="college_chroma_db")
-embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-vector_collection = chroma_client.get_collection(name="faculty_profiles", embedding_function=embedding_func)
+# Connect to Local FAISS Vector Database
+embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+try:
+    # allow_dangerous_deserialization is safe here since we generated the local index
+    vector_db = FAISS.load_local("faiss_index", embedding_model, allow_dangerous_deserialization=True)
+except Exception as e:
+    print(f"Warning: Could not load 'faiss_index'. ({e})")
+    vector_db = None
 
 # ==========================================
-# 2. LOAD NAME LISTS (THE DOUBLE-BARREL FIX)
+# 2. LOAD NAME LISTS
 # ==========================================
-# List A: SQL Names (Short, e.g., "Sunil")
 sql_names_list = get_all_faculty_names()
-
-# List B: Vector Names (Full, e.g., "Mr. Sunil Kumar V")
 vector_names_list = []
 try:
     with open("faculty_bio.json", "r") as f:
         data = json.load(f)
         vector_names_list = [item['name'] for item in data]
 except:
-    print("Warning: Could not load faculty_bio.json. Bio matching might be limited.")
+    print("Warning: Could not load faculty_bio.json.")
 
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
-
 def resolve_names(user_question):
-    """
-    Identifies the faculty name in the user input and maps it to 
-    BOTH the SQL name and the Vector name independently.
-    """
     resolved = {"sql": None, "vector": None}
     
-    # 1. Find SQL Name (Exact substring match from DB list)
     for name in sql_names_list:
         if name.lower() in user_question.lower():
             resolved["sql"] = name
             break
             
-    # 2. Find Vector Name (Fuzzy match from JSON list)
     search_term = resolved["sql"] if resolved["sql"] else user_question
-    
     for full_name in vector_names_list:
         name_parts = full_name.lower().replace(".", " ").split()
-        
         if any(part in search_term.lower() for part in name_parts if len(part) > 3):
             resolved["vector"] = full_name
             break
@@ -80,19 +66,14 @@ def resolve_names(user_question):
     return resolved
 
 def query_vector_db(question, filter_name=None):
-    """
-    Searches the Bio Database. Uses the FULL Vector Name for filtering.
-    """
-    where_clause = {"name": filter_name} if filter_name else None
+    if not vector_db:
+        return "No bio information found (Database missing)."
+        
+    filter_dict = {"name": filter_name} if filter_name else None
+    docs = vector_db.similarity_search(question, k=2, filter=filter_dict)
     
-    results = vector_collection.query(
-        query_texts=[question],
-        n_results=2,
-        where=where_clause
-    )
-    
-    if results['documents'] and results['documents'][0]:
-        return "\n".join(results['documents'][0])
+    if docs:
+        return "\n".join([doc.page_content for doc in docs])
     return "No bio information found."
 
 # ==========================================
@@ -194,9 +175,6 @@ def ask_college_bot(user_question):
     
     return final_response
 
-# ==========================================
-# 6. TERMINAL LOOP
-# ==========================================
 if __name__ == "__main__":
     print("Hi, I am your Personal AI Assistant!")
     print("Ask me about Faculty Schedules, Projects, or your teachers.")
