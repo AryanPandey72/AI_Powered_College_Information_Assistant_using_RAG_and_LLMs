@@ -7,6 +7,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from pinecone import Pinecone
+import streamlit as st
 
 from db_connector import execute_query, get_all_faculty_names
 
@@ -15,23 +16,27 @@ from db_connector import execute_query, get_all_faculty_names
 # ==========================================
 load_dotenv()
 
-if not os.getenv("GROQ_API_KEY"):
-    raise ValueError("GROQ_API_KEY not found. Check your .env file.")
+# 🔥 FIX: Support BOTH local (.env) and Streamlit secrets
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY")
 
-if not os.getenv("PINECONE_API_KEY"):
-    raise ValueError("PINECONE_API_KEY not found. Check your .env file.")
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY not found in environment or Streamlit secrets.")
+
+if not PINECONE_API_KEY:
+    raise ValueError("PINECONE_API_KEY not found in environment or Streamlit secrets.")
 
 # Initialize LLM
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0,
-    api_key=os.getenv("GROQ_API_KEY")
+    api_key=GROQ_API_KEY
 )
 
-# 🔥 REPLACED: FAISS → Pinecone
+# 🔥 Pinecone setup
 embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index("college-rag")
 
 # ==========================================
@@ -39,6 +44,7 @@ index = pc.Index("college-rag")
 # ==========================================
 sql_names_list = get_all_faculty_names()
 vector_names_list = []
+
 try:
     with open("faculty_bio.json", "r") as f:
         data = json.load(f)
@@ -67,7 +73,6 @@ def resolve_names(user_question):
     return resolved
 
 
-# 🔥 REPLACED FUNCTION (same logic, different backend)
 def query_vector_db(question, filter_name=None):
     try:
         query_vector = embedding_model.embed_query(question)
@@ -86,7 +91,6 @@ def query_vector_db(question, filter_name=None):
         for match in results["matches"]:
             text = match["metadata"].get("text", "")
 
-            # same filtering behavior as before
             if filter_name and filter_name.lower() not in text.lower():
                 continue
 
