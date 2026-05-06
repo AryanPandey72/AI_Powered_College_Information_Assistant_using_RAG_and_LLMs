@@ -9,3 +9,4 @@ python-dotenv
 pysqlite3-binary
 sentence-transformers
 faiss-cpu
+pinecone
