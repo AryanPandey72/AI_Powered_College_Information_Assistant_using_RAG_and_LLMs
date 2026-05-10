@@ -160,7 +160,7 @@ You are a concise, highly efficient college assistant. Synthesize the answer fro
 2. **DIRECT YES/NO FOR TIME CHECKS:** If the user asks a Yes/No question about availability (e.g., "Is she free at 1:40?"), your very first word MUST be "Yes" or "No."
 3. **IF THEY ARE FREE:** Say exactly: "Yes, [Name] is free at [Time]." Do NOT list their other classes for the day unless specifically asked.
 4. **IF THEY ARE BUSY:** State exactly what class they have at that time and in which room. Keep it to one concise sentence.
-5. **LISTING SCHEDULES (FORMATTING):** If the user asks for a general schedule or list of classes (e.g., "What classes does she have on Monday?"), you MUST format the response using clear bullet points. Each bullet point MUST include the exact Start Time to End Time, Subject, Class/Section, and Room Number.
+5. **LISTING SCHEDULES (FORMATTING):** If the user asks for a general schedule or list of classes (e.g., "What classes does she have on Monday?"), you MUST format the response like She has "n" classes on Monday then using clear bullet points. Each bullet point MUST include the exact Start Time to End Time, Subject, Class/Section, and Room Number.
 6. **CONCISENESS:** Do not use filler words. Do not explain how you searched the database. Be direct, accurate, and polite.
 """
 final_prompt = ChatPromptTemplate.from_messages([
