@@ -7,7 +7,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from pinecone import Pinecone
-import streamlit as st
 
 from db_connector import execute_query, get_all_faculty_names
 
@@ -16,27 +15,22 @@ from db_connector import execute_query, get_all_faculty_names
 # ==========================================
 load_dotenv()
 
-# 🔥 FIX: Support BOTH local (.env) and Streamlit secrets
-GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY")
+if not os.getenv("GROQ_API_KEY"):
+    raise ValueError("GROQ_API_KEY not found. Check your .env file.")
 
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY not found in environment or Streamlit secrets.")
-
-if not PINECONE_API_KEY:
-    raise ValueError("PINECONE_API_KEY not found in environment or Streamlit secrets.")
+if not os.getenv("PINECONE_API_KEY"):
+    raise ValueError("PINECONE_API_KEY not found. Check your .env file.")
 
 # Initialize LLM
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0,
-    api_key=GROQ_API_KEY
+    api_key=os.getenv("GROQ_API_KEY")
 )
 
-# 🔥 Pinecone setup
+# Pinecone Setup
 embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
-pc = Pinecone(api_key=PINECONE_API_KEY)
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index("college-rag")
 
 # ==========================================
@@ -44,7 +38,6 @@ index = pc.Index("college-rag")
 # ==========================================
 sql_names_list = get_all_faculty_names()
 vector_names_list = []
-
 try:
     with open("faculty_bio.json", "r") as f:
         data = json.load(f)
@@ -72,7 +65,6 @@ def resolve_names(user_question):
             
     return resolved
 
-
 def query_vector_db(question, filter_name=None):
     try:
         query_vector = embedding_model.embed_query(question)
@@ -87,13 +79,10 @@ def query_vector_db(question, filter_name=None):
             return "No bio information found."
 
         texts = []
-
         for match in results["matches"]:
             text = match["metadata"].get("text", "")
-
             if filter_name and filter_name.lower() not in text.lower():
                 continue
-
             texts.append(text)
 
         if texts:
@@ -103,11 +92,22 @@ def query_vector_db(question, filter_name=None):
     except Exception as e:
         return f"Vector DB Error: {e}"
 
-
 # ==========================================
-# 4. THE BRAINS (PROMPTS)
+# 4. THE BRAINS (PROMPTS & CHAINS)
 # ==========================================
 
+# --- NEW: MEMORY REWRITER ---
+rewrite_system = """
+Given a chat history and the latest user question, which might reference context in the chat history (like pronouns or implied subjects), formulate a standalone question which can be understood completely without the chat history. 
+Do NOT answer the question, just reformulate it if needed. If it already makes sense on its own, return it exactly as is.
+"""
+rewrite_prompt = ChatPromptTemplate.from_messages([
+    ("system", rewrite_system),
+    ("human", "History:\n{history}\n\nLatest Question: {question}")
+])
+rewrite_chain = rewrite_prompt | llm | StrOutputParser()
+
+# --- ROUTER ---
 router_system = """
 Classify the question into one of three types:
 1. "SQL" - For Classes, Time, Rooms, Days, or Student Projects.
@@ -119,6 +119,7 @@ Reply ONLY with "SQL", "VECTOR", or "BOTH".
 router_prompt = ChatPromptTemplate.from_messages([("system", router_system), ("human", "{question}")])
 router_chain = router_prompt | llm | StrOutputParser()
 
+# --- SQL WRITER ---
 sql_system = """
 You are a SQL Expert. Convert the User Question into a MySQL query.
 
@@ -146,18 +147,20 @@ Return ONLY the raw SQL query.
 sql_prompt = ChatPromptTemplate.from_messages([("system", sql_system), ("human", "{question}")])
 sql_chain = sql_prompt | llm | StrOutputParser()
 
+# --- FINAL ANSWER GENERATOR (UPDATED FOR STRICT CONCISENESS) ---
 final_system = """
-You are a helpful assistant. Synthesize the answer from the provided data.
+You are a concise, highly efficient college assistant. Synthesize the answer from the provided data.
 
 ### DATA SOURCES:
 1. **Database Data:** Includes the SQL Query used and the Result.
 2. **Bio Data:** Text about research/history.
 
-### RULES:
-1. Combine facts naturally.
-2. **Confidence:** If the SQL Query returned a row for a specific time check (like 9:10 AM), confirm clearly that the faculty has a class at that time.
-3. **Accuracy:** Ensure the bio details match the person asked about.
-In the answer don't talk about the query process; just provide the final information.
+### STRICT RULES FOR ANSWERING:
+1. **NO MATH OR SECONDS:** You are strictly forbidden from calculating time differences, mentioning seconds, or explaining time math.
+2. **DIRECT YES/NO:** If the user asks a Yes/No question (e.g., "Is she free at 1:40?"), your very first word MUST be "Yes" or "No."
+3. **IF THEY ARE FREE:** If the SQL result is empty for a specific time check, it means they are free. Say exactly: "Yes, [Name] is free at [Time]." Do NOT list their other classes for the day unless specifically asked.
+4. **IF THEY ARE BUSY:** State exactly what class they have at that time and in which room. Keep it to one concise sentence.
+5. **CONCISENESS:** Do not use filler words. Do not explain how you searched the database. Be direct, accurate, and polite.
 """
 final_prompt = ChatPromptTemplate.from_messages([
     ("system", final_system), 
@@ -168,13 +171,30 @@ final_chain = final_prompt | llm | StrOutputParser()
 # ==========================================
 # 5. MAIN LOGIC
 # ==========================================
-def ask_college_bot(user_question):
-    names = resolve_names(user_question)
+def ask_college_bot(user_question, chat_history=[]):
+    # 1. Handle Chat Memory (Rewrite question if necessary)
+    history_str = ""
+    if chat_history:
+        # Get the last 4 messages to provide recent context without overloading
+        recent_history = chat_history[-4:] 
+        history_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in recent_history])
+    
+    if history_str:
+        standalone_question = rewrite_chain.invoke({
+            "history": history_str, 
+            "question": user_question
+        }).strip()
+        print(f"\n[DEBUG] Rewrote '{user_question}' -> '{standalone_question}'")
+    else:
+        standalone_question = user_question
+
+    # 2. Proceed with the Standalone Question
+    names = resolve_names(standalone_question)
     sql_target = names["sql"]      
     vector_target = names["vector"] 
     
     try:
-        strategy = router_chain.invoke({"question": user_question}).strip()
+        strategy = router_chain.invoke({"question": standalone_question}).strip()
     except:
         strategy = "BOTH" 
     
@@ -182,7 +202,7 @@ def ask_college_bot(user_question):
 
     if strategy in ["SQL", "BOTH"]:
         target = sql_target if sql_target else "the faculty"
-        enhanced_q = f"{user_question} (Refer to {target})"
+        enhanced_q = f"{standalone_question} (Refer to {target})"
         
         query = sql_chain.invoke({"question": enhanced_q}).replace("```sql", "").replace("```", "").strip()
         
@@ -193,20 +213,23 @@ def ask_college_bot(user_question):
              context_data.append("Database Data: No relevant SQL generated.")
 
     if strategy in ["VECTOR", "BOTH"]:
-        bio_result = query_vector_db(user_question, filter_name=vector_target)
+        bio_result = query_vector_db(standalone_question, filter_name=vector_target)
         context_data.append(f"Bio Data: {bio_result}")
 
+    # 3. Generate Final Output
     final_response = final_chain.invoke({
-        "question": user_question,
+        "question": standalone_question,
         "context": "\n\n".join(context_data)
     })
     
     return final_response
 
-
 if __name__ == "__main__":
     print("Hi, I am your Personal AI Assistant!")
     print("Ask me about Faculty Schedules, Projects, or your teachers.")
+
+    # Simple terminal memory for local testing
+    local_history = []
 
     while True:
         try:
@@ -220,11 +243,16 @@ if __name__ == "__main__":
                 continue
 
             print("Bot: Thinking...", end="\r")
-            response = ask_college_bot(user_input)
+            
+            # Pass local history to the bot
+            response = ask_college_bot(user_input, chat_history=local_history)
+            
+            # Update local history
+            local_history.append({"role": "user", "content": user_input})
+            local_history.append({"role": "assistant", "content": response})
             
             sys.stdout.write("\033[K") 
             print(f"Bot: {response}\n")
-            print("Type 'exit' or 'quit' to stop.")
             
         except KeyboardInterrupt:
             print("\nBot: Signing Off. Goodbye!")
