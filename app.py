@@ -82,7 +82,7 @@ if prompt := st.chat_input("Ask anything about Faculty Schedules, Projects, or y
         with st.spinner("Thinking..."):
             try:
                 # Call your existing backend function
-                response = ask_college_bot(prompt)
+                response = ask_college_bot(prompt, st.session_state.messages)
                 st.markdown(response)
                 # Append assistant response to UI
                 st.session_state.messages.append({"role": "assistant", "content": response})
